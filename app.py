@@ -622,15 +622,9 @@ with tab_pulse:
 
     # ── Economic calendar ─────────────────────────────────────────────────────
     st.subheader("Economic Calendar")
-    st.caption("Key macro events for US, EU, GB, JP, AU, CA")
-    st.iframe(
-        _tv_url(
-            "events",
-            colorTheme="light",
-            isTransparent=False,
-            locale="en",
-            importanceFilter="-1,0,1",
-            countryFilter="us,eu,gb,jp,au,ca",
-        ),
-        height=520,
+    st.caption("Key macro events — opens MarketWatch in a new tab")
+    st.link_button(
+        "📅 Open MarketWatch Economic Calendar",
+        "https://www.marketwatch.com/economy-politics/calendar",
+        use_container_width=True,
     )
