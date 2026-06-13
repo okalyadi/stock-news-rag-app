@@ -292,8 +292,10 @@ with st.sidebar:
         label_visibility="collapsed",
     )
 
-    build_disabled = not nebius_ok() or not tickers_input.strip()
+    build_disabled = not nebius_ok()
     if st.button("Build Index", type="primary", disabled=build_disabled, use_container_width=True):
+        if not tickers_input.strip():
+            st.warning("Please enter at least one stock ticker (e.g. AAPL, TSLA).")
         raw_tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
         if raw_tickers:
             with st.spinner(f"Fetching & embedding news for {', '.join(raw_tickers)} …"):
