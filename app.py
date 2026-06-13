@@ -965,3 +965,11 @@ with tab_trending:
             )
     else:
         st.info("Click **Scan Trending Up** or **Scan Trending Down** to begin.", icon="ℹ️")
+
+st.divider()
+st.caption(
+    "⚠️ **Disclaimer:** This app aggregates publicly available market data and news "
+    "from third-party sources for informational purposes only. Nothing here constitutes "
+    "financial advice or a recommendation to buy or sell any security. Always do your "
+    "own research before making investment decisions."
+)
