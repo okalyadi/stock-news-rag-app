@@ -11,6 +11,9 @@ dependencies = [
     "numpy>=1.26.0",
     "groq>=0.11.0",
     "python-dotenv>=1.0.0",
+    "beautifulsoup4>=4.15.0",
+    "requests>=2.34.2",
+    "playwright>=1.60.0",
 ]
 
 [build-system]

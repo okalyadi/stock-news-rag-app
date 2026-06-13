@@ -247,6 +247,174 @@ def _tradingview_chart(ticker: str, exchange: str = "", height: int = 520) -> No
     st.iframe(url, height=height)
 
 
+def _fetch_benzinga_catalyst(ticker: str) -> dict:
+    import requests
+    from bs4 import BeautifulSoup
+    try:
+        url = f"https://www.benzinga.com/quote/{ticker}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        resp = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)[:3000]
+
+        from groq import Groq
+        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        prompt = (
+            f"What recent news or catalyst is driving {ticker} stock today? "
+            "Return a one-sentence summary, then up to 2 recent headlines verbatim. "
+            "Just the data — no commentary.\n\n"
+            f"Page content:\n{text}"
+        )
+        response = client.chat.completions.create(
+            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+            temperature=0.1,
+        )
+        result = response.choices[0].message.content.strip()
+        lines = [l.strip() for l in result.split("\n") if l.strip()]
+        return {"catalyst": lines[0] if lines else None, "headlines": lines[1:3]}
+    except Exception:
+        return {"catalyst": None, "headlines": []}
+
+
+def _run_gapper_scan() -> dict:
+    from datetime import datetime
+    from yfinance.screener.screener import screen, EquityQuery
+
+    query = EquityQuery("and", [
+        EquityQuery("gt",  ["percentchange", 5]),
+        EquityQuery("eq",  ["region", "us"]),
+        EquityQuery("gte", ["intradaymarketcap", 100_000_000]),
+        EquityQuery("gt",  ["intradayprice", 3]),
+        EquityQuery("gt",  ["dayvolume", 50_000]),
+    ])
+    result = screen(query, sortField="dayvolume", sortAsc=False, size=50)
+    quotes = result.get("quotes", [])
+
+    top10 = quotes[:10]
+
+    gappers = []
+    for i, q in enumerate(top10):
+        ticker  = q.get("symbol", "")
+        price   = q.get("preMarketPrice")         or q.get("regularMarketPrice")         or 0
+        gap_pct = q.get("preMarketChangePercent")  or q.get("regularMarketChangePercent")  or 0
+        volume  = q.get("preMarketVolume")         or q.get("regularMarketVolume")         or 0
+        mkt_cap = q.get("marketCap")               or 0
+
+        cat = _fetch_benzinga_catalyst(ticker)
+        gappers.append({
+            "rank":             i + 1,
+            "symbol":           ticker,
+            "price":            round(float(price), 2),
+            "gap_pct":          round(float(gap_pct), 2),
+            "premarket_volume": int(volume),
+            "market_cap":       _fmt_mcap(mkt_cap),
+            "catalyst":         cat["catalyst"],
+            "headlines":        cat["headlines"],
+        })
+
+    return {"scanned_at": datetime.now().isoformat(), "gappers": gappers}
+
+
+def _run_trending_scan(direction: str) -> dict:
+    """direction: 'up' or 'down'"""
+    from datetime import datetime
+    from yfinance.screener.screener import screen, EquityQuery
+
+    change_filter = EquityQuery("gt", ["percentchange",  5]) if direction == "up" \
+               else EquityQuery("lt", ["percentchange", -5])
+
+    query = EquityQuery("and", [
+        change_filter,
+        EquityQuery("eq",  ["region", "us"]),
+        EquityQuery("gt",  ["intradayprice", 1]),
+        EquityQuery("gt",  ["avgdailyvol3m", 1_000_000]),
+        EquityQuery("gt",  ["dayvolume",     1_000_000]),
+    ])
+    result = screen(query, sortField="dayvolume", sortAsc=False, size=50)
+    quotes = result.get("quotes", [])
+
+    # Post-filter: relative volume > 1.5 and ATR >= 1
+    tickers_for_atr = [q.get("symbol", "") for q in quotes if q.get("symbol")][:20]
+    atr_map: dict[str, float] = {}
+    if tickers_for_atr:
+        try:
+            hist = yf.download(
+                tickers_for_atr, period="14d", interval="1d",
+                auto_adjust=True, progress=False, multi_level_index=True,
+            )
+            for sym in tickers_for_atr:
+                try:
+                    high  = hist["High"][sym].dropna()
+                    low   = hist["Low"][sym].dropna()
+                    close = hist["Close"][sym].dropna()
+                    tr = (high - low).combine(
+                        (high - close.shift(1)).abs(), max
+                    ).combine(
+                        (low  - close.shift(1)).abs(), max
+                    )
+                    atr_map[sym] = float(tr.rolling(14).mean().iloc[-1])
+                except Exception:
+                    atr_map[sym] = 0.0
+        except Exception:
+            pass
+
+    # Intraday time adjustment for RVOL (Finviz-style)
+    # RVOL = current_volume / (avg_daily_volume × fraction_of_session_elapsed)
+    # This prevents early-session stocks looking low-RVOL vs full-day average.
+    from zoneinfo import ZoneInfo
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    market_open  = now_et.replace(hour=9,  minute=30, second=0, microsecond=0)
+    market_close = now_et.replace(hour=16, minute=0,  second=0, microsecond=0)
+    elapsed  = (now_et - market_open).total_seconds()
+    session  = (market_close - market_open).total_seconds()
+    day_frac = max(0.05, min(1.0, elapsed / session))  # clamp to [5%, 100%]
+
+    filtered = []
+    for q in quotes:
+        sym     = q.get("symbol", "")
+        price   = float(q.get("regularMarketPrice") or 0)
+        chg_pct = float(q.get("regularMarketChangePercent") or 0)
+        vol     = float(q.get("regularMarketVolume") or 0)
+        avg_vol = float(q.get("averageDailyVolume3Month") or 0)
+        mkt_cap = q.get("marketCap") or 0
+
+        # Time-adjusted expected volume for the elapsed portion of the session
+        expected_vol = avg_vol * day_frac
+        rel_vol = (vol / expected_vol) if expected_vol > 0 else 0
+        atr     = atr_map.get(sym, 999.0)  # if ATR not fetched, don't block
+
+        if rel_vol >= 1.5 and atr >= 1.0:
+            try:
+                has_options = len(yf.Ticker(sym).options) > 0
+            except Exception:
+                has_options = False
+            if has_options:
+                filtered.append({
+                    "symbol":      sym,
+                    "price":       round(price, 2),
+                    "chg_pct":     round(chg_pct, 2),
+                    "volume":      int(vol),
+                    "avg_volume":  _fmt_vol(avg_vol),
+                    "rvol":        round(rel_vol, 2),
+                    "atr":         round(atr, 2),
+                    "market_cap":  _fmt_mcap(mkt_cap),
+                })
+
+    filtered.sort(key=lambda x: x["volume"], reverse=True)
+    top10 = filtered[:10]
+    for i, g in enumerate(top10):
+        g["rank"] = i + 1
+
+    return {"scanned_at": datetime.now().isoformat(), "direction": direction, "stocks": top10}
+
+
 def _render_sources(sources: list[dict]) -> None:
     with st.expander("Sources", expanded=False):
         if not sources:
@@ -322,8 +490,8 @@ with st.sidebar:
     st.caption("Powered by Nebius · Groq · yfinance")
 
 # ── Main area: tabs ───────────────────────────────────────────────────────────
-tab_chat, tab_browse, tab_overview, tab_pulse = st.tabs(
-    ["💬 Chat", "🔍 Browse Articles", "📊 Stock Overview", "📅 Market Pulse"]
+tab_chat, tab_browse, tab_overview, tab_pulse, tab_gappers, tab_trending = st.tabs(
+    ["💬 Chat", "🔍 Browse Articles", "📊 Stock Overview", "📅 Market Pulse", "🚀 Premarket Gappers", "📈 Trending Stocks"]
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -634,3 +802,161 @@ with tab_pulse:
         ),
         height=520,
     )
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PREMARKET GAPPERS TAB
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_gappers:
+    import json
+    from datetime import date
+
+    st.subheader("Premarket Gappers Scanner")
+    st.caption("Filters: gap >5% · price >$3 · premarket vol >50K · mkt cap >$100M · top 10 by gap %")
+
+    if st.button("🔍 Scan Now", type="primary"):
+        with st.spinner("Scanning premarket gappers and fetching catalysts… (60–90 s)"):
+            try:
+                result = _run_gapper_scan()
+                st.session_state["gappers_result"] = result
+                today = date.today().isoformat()
+                with open(f"premarket_gappers_{today}.json", "w") as _f:
+                    json.dump(result, _f, indent=2)
+            except Exception as _exc:
+                st.error(f"Scan failed: {_exc}")
+                result = None
+    else:
+        result = st.session_state.get("gappers_result")
+
+    if result:
+        gappers = result["gappers"]
+        scanned_at = result["scanned_at"][:19].replace("T", " ")
+
+        if not gappers:
+            st.info("No gappers matched the filters right now. Try again during pre-market hours (4–9:30 AM ET).", icon="ℹ️")
+        else:
+            top3 = gappers[:3]
+            summary = ", ".join(
+                f"{g['symbol']} ({g['gap_pct']:+.1f}%) — {g['catalyst'] or 'no catalyst'}"
+                for g in top3
+            )
+            st.success(f"**Premarket Gappers: {len(gappers)} names.** Top: {summary}")
+            st.caption(f"Scanned at {scanned_at}")
+            st.divider()
+
+            for g in gappers:
+                with st.expander(
+                    f"#{g['rank']}  {g['symbol']}  ·  {g['gap_pct']:+.1f}%  ·  ${g['price']:.2f}",
+                    expanded=(g["rank"] == 1),
+                ):
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Gap %", f"{g['gap_pct']:+.1f}%")
+                    c2.metric("Price", f"${g['price']:.2f}")
+                    c3.metric("Mkt Cap", g["market_cap"])
+                    c4.metric("Pre-mkt Vol", _fmt_vol(g["premarket_volume"]))
+                    if g.get("catalyst"):
+                        st.markdown(f"**Catalyst:** {g['catalyst']}")
+                    for h in g.get("headlines", []):
+                        st.markdown(f"- {h}")
+
+            st.divider()
+            st.download_button(
+                "⬇️ Download JSON",
+                data=json.dumps(result, indent=2),
+                file_name=f"premarket_gappers_{date.today().isoformat()}.json",
+                mime="application/json",
+            )
+    else:
+        st.info("Click **Scan Now** to find today's premarket gappers.", icon="ℹ️")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TRENDING STOCKS TAB
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_trending:
+    import json as _json
+    from datetime import date as _date
+
+    st.subheader("Trending Stocks Scanner")
+    st.caption("Filters: change >±5% · price >$1 · avg vol >1M · RVOL >1.5× · ATR ≥1 · has options · sorted by volume")
+
+    st.markdown("""
+    <style>
+    /* Target only the 2-column row in the last tabpanel (Trending Stocks).
+       :first-child:nth-last-child(2) matches a column that is both first AND
+       second-to-last, which is only true in a 2-column layout — not 4/6 col rows. */
+    div[role="tabpanel"]:last-child
+        [data-testid="stColumn"]:first-child:nth-last-child(2) button {
+        background-color: #1a7a3c !important;
+        color: white !important;
+        border: none !important;
+    }
+    div[role="tabpanel"]:last-child
+        [data-testid="stColumn"]:first-child:nth-last-child(2) button:hover {
+        background-color: #145e2e !important;
+    }
+    div[role="tabpanel"]:last-child
+        [data-testid="stColumn"]:last-child:nth-child(2) button {
+        background-color: #b91c1c !important;
+        color: white !important;
+        border: none !important;
+    }
+    div[role="tabpanel"]:last-child
+        [data-testid="stColumn"]:last-child:nth-child(2) button:hover {
+        background-color: #991818 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    col_up, col_dn = st.columns(2)
+    scan_up = col_up.button("📈 Scan Trending Up",   use_container_width=True)
+    scan_dn = col_dn.button("📉 Scan Trending Down", use_container_width=True)
+
+    if scan_up or scan_dn:
+        direction = "up" if scan_up else "down"
+        label = "up" if scan_up else "down"
+        with st.spinner(f"Scanning stocks trending {label}… (30–60 s)"):
+            try:
+                trend_result = _run_trending_scan(direction)
+                st.session_state[f"trending_{direction}"] = trend_result
+            except Exception as _exc:
+                st.error(f"Scan failed: {_exc}")
+                trend_result = None
+    else:
+        # Show whichever was last scanned
+        trend_result = st.session_state.get("trending_up") or st.session_state.get("trending_dn")
+
+    if trend_result:
+        stocks    = trend_result["stocks"]
+        direction = trend_result["direction"]
+        scanned_at = trend_result["scanned_at"][:19].replace("T", " ")
+        arrow = "📈" if direction == "up" else "📉"
+
+        if not stocks:
+            st.info(f"No stocks matched the filters for trending {direction} right now.", icon="ℹ️")
+        else:
+            st.success(f"{arrow} **{len(stocks)} stocks trending {direction}** — top by volume")
+            st.caption(f"Scanned at {scanned_at}")
+            st.divider()
+
+            for g in stocks:
+                chg_color = "🟢" if direction == "up" else "🔴"
+                with st.expander(
+                    f"#{g['rank']}  {g['symbol']}  ·  {chg_color} {g['chg_pct']:+.1f}%  ·  ${g['price']:.2f}",
+                    expanded=(g["rank"] == 1),
+                ):
+                    c1, c2, c3, c4, c5, c6 = st.columns(6)
+                    c1.metric("Change %",  f"{g['chg_pct']:+.1f}%")
+                    c2.metric("Price",     f"${g['price']:.2f}")
+                    c3.metric("Volume",    _fmt_vol(g["volume"]))
+                    c4.metric("Avg Vol",   g["avg_volume"])
+                    c5.metric("RVOL",      f"{g['rvol']:.1f}×")
+                    c6.metric("ATR",       f"{g['atr']:.2f}")
+
+            st.divider()
+            st.download_button(
+                "⬇️ Download JSON",
+                data=_json.dumps(trend_result, indent=2),
+                file_name=f"trending_{direction}_{_date.today().isoformat()}.json",
+                mime="application/json",
+            )
+    else:
+        st.info("Click **Scan Trending Up** or **Scan Trending Down** to begin.", icon="ℹ️")
