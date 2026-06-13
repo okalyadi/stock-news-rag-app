@@ -1,0 +1,24 @@
+# Environment & secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Evaluation output
+eval/eval_results.json
+
+# macOS
+.DS_Store
+
+# Claude
+.claude/
+
+# IDE
+.vscode/
+.idea/
