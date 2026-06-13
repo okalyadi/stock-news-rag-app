@@ -601,8 +601,8 @@ with tab_pulse:
 
     st.divider()
 
-    # ── Top 5 movers ──────────────────────────────────────────────────────────
-    st.subheader("Today's Top 5 Movers")
+    # ── Top 10 movers ─────────────────────────────────────────────────────────
+    st.subheader("Today's Top 10 Movers")
     st.caption("Powered by TradingView · US equities")
     st.iframe(
         _tv_url(
@@ -615,7 +615,7 @@ with tab_pulse:
             showSymbolLogo=True,
             showFloatingTooltip=False,
         ),
-        height=500,
+        height=800,
     )
 
     st.divider()
