@@ -488,6 +488,13 @@ with st.sidebar:
 
     st.divider()
     st.caption("Powered by Nebius · Groq · yfinance")
+    st.divider()
+    st.caption(
+        "⚠️ **Disclaimer:** This app aggregates publicly available market data and news "
+        "from third-party sources for informational purposes only. Nothing here constitutes "
+        "financial advice or a recommendation to buy or sell any security. Always do your "
+        "own research before making investment decisions."
+    )
 
 # ── Main area: tabs ───────────────────────────────────────────────────────────
 tab_chat, tab_browse, tab_overview, tab_pulse, tab_gappers, tab_trending = st.tabs(
