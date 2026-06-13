@@ -811,7 +811,6 @@ with tab_gappers:
     from datetime import date
 
     st.subheader("Premarket Gappers Scanner")
-    st.caption("Filters: gap >5% · price >$3 · premarket vol >50K · mkt cap >$100M · top 10 by gap %")
 
     if st.button("🔍 Scan Now", type="primary"):
         with st.spinner("Scanning premarket gappers and fetching catalysts… (60–90 s)"):
@@ -876,7 +875,6 @@ with tab_trending:
     from datetime import date as _date
 
     st.subheader("Trending Stocks Scanner")
-    st.caption("Filters: change >±5% · price >$1 · avg vol >1M · RVOL >1.5× · ATR ≥1 · has options · sorted by volume")
 
     st.markdown("""
     <style>
