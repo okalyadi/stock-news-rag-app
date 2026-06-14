@@ -58,24 +58,38 @@ def _groq_configured() -> bool:
     return bool(os.getenv("GROQ_API_KEY", "").strip())
 
 
+_GROQ_FALLBACK_MODEL = "llama-3.1-8b-instant"
+
+
 def _stream_groq(messages: list[dict]):
-    """Yield text chunks from Groq; raises on missing key."""
-    from groq import Groq  # lazy import so app starts without it installed
+    from groq import Groq, RateLimitError
 
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    primary = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-    stream = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        stream=True,
-        max_tokens=1024,
-        temperature=0.2,
-    )
-    for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            yield delta
+    for model in [primary, _GROQ_FALLBACK_MODEL]:
+        try:
+            stream = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                stream=True,
+                max_tokens=1024,
+                temperature=0.2,
+            )
+            if model != primary:
+                yield f"*(switched to {model} — daily token limit reached on {primary})*\n\n"
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    yield delta
+            return
+        except RateLimitError:
+            if model == _GROQ_FALLBACK_MODEL:
+                raise RuntimeError(
+                    "Daily token limit reached on both models. "
+                    "Please try again tomorrow or upgrade your Groq plan."
+                )
+            continue
 
 
 def _build_llm_messages(history: list[dict], prompt: str, context: str | None) -> list[dict]:
@@ -262,20 +276,29 @@ def _fetch_benzinga_catalyst(ticker: str) -> dict:
             tag.decompose()
         text = soup.get_text(separator="\n", strip=True)[:3000]
 
-        from groq import Groq
+        from groq import Groq, RateLimitError
         client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        primary = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
         prompt = (
             f"What recent news or catalyst is driving {ticker} stock today? "
             "Return a one-sentence summary, then up to 2 recent headlines verbatim. "
             "Just the data — no commentary.\n\n"
             f"Page content:\n{text}"
         )
-        response = client.chat.completions.create(
-            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
-            temperature=0.1,
-        )
+        response = None
+        for model in [primary, _GROQ_FALLBACK_MODEL]:
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=200,
+                    temperature=0.1,
+                )
+                break
+            except RateLimitError:
+                continue
+        if not response:
+            return {"catalyst": None, "headlines": []}
         result = response.choices[0].message.content.strip()
         lines = [l.strip() for l in result.split("\n") if l.strip()]
         return {"catalyst": lines[0] if lines else None, "headlines": lines[1:3]}
