@@ -306,9 +306,24 @@ def _fetch_benzinga_catalyst(ticker: str) -> dict:
         return {"catalyst": None, "headlines": []}
 
 
+def _yf_screen(query, sort_field="dayvolume", size=50, retries=3, delay=6):
+    import time
+    from yfinance.screener.screener import screen
+    for attempt in range(retries):
+        try:
+            return screen(query, sortField=sort_field, sortAsc=False, size=size)
+        except Exception as exc:
+            is_rate_limit = any(k in str(exc) for k in ["429", "Too Many", "rate", "Rate"])
+            if is_rate_limit and attempt < retries - 1:
+                time.sleep(delay * (attempt + 1))
+            else:
+                raise
+    return {}
+
+
 def _run_gapper_scan() -> dict:
     from datetime import datetime
-    from yfinance.screener.screener import screen, EquityQuery
+    from yfinance.screener.screener import EquityQuery
 
     query = EquityQuery("and", [
         EquityQuery("gt",  ["percentchange", 5]),
@@ -317,7 +332,7 @@ def _run_gapper_scan() -> dict:
         EquityQuery("gt",  ["intradayprice", 3]),
         EquityQuery("gt",  ["dayvolume", 50_000]),
     ])
-    result = screen(query, sortField="dayvolume", sortAsc=False, size=50)
+    result = _yf_screen(query)
     quotes = result.get("quotes", [])
 
     top10 = quotes[:10]
@@ -348,7 +363,7 @@ def _run_gapper_scan() -> dict:
 def _run_trending_scan(direction: str) -> dict:
     """direction: 'up' or 'down'"""
     from datetime import datetime
-    from yfinance.screener.screener import screen, EquityQuery
+    from yfinance.screener.screener import EquityQuery
 
     change_filter = EquityQuery("gt", ["percentchange",  5]) if direction == "up" \
                else EquityQuery("lt", ["percentchange", -5])
@@ -359,8 +374,9 @@ def _run_trending_scan(direction: str) -> dict:
         EquityQuery("gt",  ["intradayprice", 1]),
         EquityQuery("gt",  ["avgdailyvol3m", 1_000_000]),
         EquityQuery("gt",  ["dayvolume",     1_000_000]),
+        EquityQuery("gte", ["intradaymarketcap", 1_000_000_000]),
     ])
-    result = screen(query, sortField="dayvolume", sortAsc=False, size=50)
+    result = _yf_screen(query)
     quotes = result.get("quotes", [])
 
     # Post-filter: relative volume > 1.5 and ATR >= 1
